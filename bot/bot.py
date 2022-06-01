@@ -21,7 +21,7 @@ def main():
     client = TelegramClient('anon', api_id, api_hash)
     model = Model()
 
-    @client.on(events.NewMessage(chats=chat_id))
+    @client.on(events.NewMessage(chats=chat_id, incoming=True))
     async def chat_update(event):
         model.update_buffer(await event.message)
 

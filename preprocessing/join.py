@@ -6,12 +6,13 @@ import pandas as pd
 from typing import List
 
 
-def read_databases(input_path: str):
+def read_databases(input_path: str, output_path: str):
     files = os.listdir(input_path)
+    output_file = os.path.basename(os.path.normpath(output_path))
     databases = []
 
     for file in files:
-        if file.endswith('.csv'):
+        if file.endswith('.csv') and file != output_file:
             json_file = file.rstrip('.csv') + '.json'
             if json_file in files:
                 database = pd.read_csv(os.path.join(input_path, file),
@@ -52,9 +53,13 @@ def main():
     parser.add_argument('output_path', type=str)
     args = parser.parse_args()
 
-    databases = read_databases(args.input_path)
+    databases = read_databases(args.input_path, args.output_path)
     database = merge_databases(databases)
+
+    database['time'] = pd.to_datetime(database['time'], dayfirst=True)
     database.to_csv(args.output_path, index=False)
+    with open(args.output_path.rstrip('.csv') + '.json', 'w') as f:
+        json.dump(list(database['sender'].unique()), f, ensure_ascii=False)
 
 
 if __name__ == "__main__":
