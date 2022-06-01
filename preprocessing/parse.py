@@ -114,8 +114,7 @@ def main():
 
     # Sets output filename as the chat's name
     chatName = lines[15]
-    outputFile = "Telegram-" + "".join(c if c.isalnum() else "_" for c in chatName) + ".csv"
-    outputFile = os.path.join(args.output_path, outputFile)
+    outputFile = args.output_path
 
     ################################################################################
 
