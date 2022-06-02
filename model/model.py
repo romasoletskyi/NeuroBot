@@ -30,21 +30,21 @@ class TimeNet(nn.Module):
         self.senders_emb = nn.Embedding(len(self.senders), 8)
 
         self.encoder = nn.Sequential(
-            nn.Linear(14 * params.message_buffer_limit, 128),
+            nn.Linear(14 * params.time_buffer_limit, 64),
             nn.ReLU(),
-            nn.Linear(128, 128),
+            nn.Linear(64, 64),
             nn.ReLU(),
-            nn.Linear(128, 128),
+            nn.Linear(64, 64),
             nn.ReLU(),
-            nn.Linear(128, 2)
+            nn.Linear(64, 2)
         )
 
-    def forward(self, messages: List[Message]):
-        x = self.embed_state(messages)
+    def forward(self, messages_list: List[List[Message]]) -> torch.Tensor:
+        x = torch.stack([self.embed_state(messages) for messages in messages_list])
         x = self.encoder(x)
 
-        x[0] = F.sigmoid(x[0])
-        x[1] = F.relu(x[1])
+        x[:, 0] = torch.sigmoid(x[:, 0])
+        x[:, 1] = F.relu(x[:, 1]) + 1e-3
 
         return x
 
@@ -57,20 +57,27 @@ class TimeNet(nn.Module):
                                           minutes=message_time.minute,
                                           seconds=message_time.second)
             time.append(message_timedelta.total_seconds() / params.time_norm)
-            relative_time.append((messages[-1].time - message.time) / params.time_norm)
+            relative_time.append((messages[-1].time - message.time).total_seconds() / params.time_norm)
 
         time = torch.tensor(np.array(time))[:, None]
-        relative_time = torch.tensor(np.array(time))[:, None]
+        relative_time = torch.tensor(np.array(relative_time))[:, None]
 
-        message_lens = np.array([len(message.text.split()) for message in messages])
-        message_lens = torch.tensor(np.clip(message_lens, 1, params.len_embedding) - 1)
+        try:
+            message_lens = np.array([len(message.text.split()) for message in messages])
+        except AttributeError:
+            print([message.text for message in messages])
+            for message in messages:
+                print(message.text.split(), len(message.text.split()))
+            raise AttributeError
+
+        message_lens = torch.tensor(np.clip(message_lens, 0, params.len_embedding - 1))
         message_lens = self.len_emb(message_lens)
 
         message_senders = torch.tensor(np.array([self.senders_to_int[message.sender] for message in messages]))
         message_senders = self.senders_emb(message_senders)
 
-        embedding = torch.cat([time, relative_time, message_lens, message_senders])
-        return embedding
+        embedding = torch.flatten(torch.cat([time, relative_time, message_lens, message_senders], dim=1))
+        return embedding.float()
 
 
 class Model:

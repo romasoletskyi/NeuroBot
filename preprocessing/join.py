@@ -57,7 +57,9 @@ def main():
     database = merge_databases(databases)
 
     database['time'] = pd.to_datetime(database['time'], dayfirst=True)
+    database['content'] = database['content'].fillna(' ')
     database.to_csv(args.output_path, index=False)
+
     with open(args.output_path.rstrip('.csv') + '.json', 'w') as f:
         json.dump(list(database['sender'].unique()), f, ensure_ascii=False)
 
