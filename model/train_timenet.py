@@ -66,10 +66,10 @@ def main():
 
     train_dataset = MessageDataset(data, train_indices)
     train_dataloader = DataLoader(train_dataset, batch_size=params.time_net_batch_size,
-                                  shuffle=True, drop_last=False, collate_fn=collate_fn)
+                                  shuffle=True, drop_last=True, collate_fn=collate_fn)
     test_dataset = MessageDataset(data, test_indices)
     test_dataloader = DataLoader(test_dataset, batch_size=params.time_net_batch_size,
-                                 shuffle=True, drop_last=True, collate_fn=collate_fn)
+                                 shuffle=False, drop_last=False, collate_fn=collate_fn)
 
     model = TimeNet()
     optimizer = torch.optim.Adam(model.parameters())

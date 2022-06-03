@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from typing import Union, Tuple, List
 
 import params
@@ -78,6 +79,29 @@ class TimeNet(nn.Module):
 
         embedding = torch.flatten(torch.cat([time, relative_time, message_lens, message_senders], dim=1))
         return embedding.float()
+
+
+class CasualModel:
+    def __init__(self, model, tokenizer):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.add_names()
+
+    def add_names(self):
+        new_tokens = json.load(open(params.names_path, 'r'))
+        new_tokens = [token.lower() for token in new_tokens]
+        new_tokens = list(set(new_tokens) - set(self.tokenizer.vocab))
+        self.tokenizer.add_tokens(new_tokens)
+        self.model.resize_token_embeddings(len(self.tokenizer))
+
+    def train_forward(self, tokens):
+        return self.model(**tokens, labels=tokens['input_ids'])
+
+
+class BertModel(CasualModel):
+    def __init__(self):
+        CasualModel.__init__(self, AutoModelForCausalLM.from_pretrained('cointegrated/rubert-tiny2', is_decoder=True),
+                             AutoTokenizer.from_pretrained('cointegrated/rubert-tiny2'))
 
 
 class Model:
