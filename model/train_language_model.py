@@ -19,14 +19,17 @@ https://huggingface.co/models?filter=text-generation
 # You can also adapt this script on your own causal language modeling task. Pointers for this are left as comments.
 
 import argparse
+import json
 import numpy as np
+import os
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 from tqdm import tqdm
+from typing import Dict
 
 import params
-from model.model import BertModel
+from model.model import GPTModel
 
 
 class TextDataset(Dataset):
@@ -40,8 +43,42 @@ class TextDataset(Dataset):
         return {key: self.tokens[key][:, idx: idx + params.chunk_size] for key in self.tokens}
 
 
+class FocusTextDataset(Dataset):
+    def __init__(self, tokens, tokenizer):
+        self.tokens = tokens
+        self.indices = self.compute_indices(tokenizer)
+
+    def compute_indices(self, tokenizer) -> torch.Tensor:
+        new_tokens = json.load(open(params.names_path, 'r'))
+        new_tokens = [tokenizer.vocab[token.lower()] for token in new_tokens]
+        token_bound = min(new_tokens)
+        focus_token = tokenizer.vocab[params.focus_sender.lower()]
+
+        start_index = torch.arange(self.tokens['input_ids'].shape[1] - params.chunk_size + 1)
+        inner_index = torch.arange(params.chunk_size)
+
+        batches: torch.Tensor = self.tokens['input_ids'].squeeze(0)[start_index[:, None] + inner_index[None, :]]
+        where_last_sender = params.chunk_size - 2 - torch.argmax(
+            (torch.flip(batches[:, :-1], [1]) >= token_bound).long(), dim=1)
+
+        is_focus = (batches[:, -1] == focus_token) + (
+                    batches[torch.arange(batches.shape[0]), where_last_sender] == focus_token)
+        return is_focus
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        focus_idx = self.indices[idx]
+        return {key: self.tokens[key][:, focus_idx: focus_idx + params.chunk_size] for key in self.tokens}
+
+
 def collate_fn(examples):
     return {key: torch.cat([example[key] for example in examples], 0) for key in examples[0]}
+
+
+def accuracy_metric(pred: torch.Tensor, ref: torch.Tensor):
+    return (torch.sum(pred == ref) / torch.prod(torch.tensor(pred.shape))).item()
 
 
 def main():
@@ -51,49 +88,65 @@ def main():
     args = parser.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = BertModel()
+    output_path = args.output_model
+    model = GPTModel()
     model.model.to(device)
 
-    train_text = open(args.corpus_path + '-train', 'r').read()
-    test_text = open(args.corpus_path + '-test', 'r').read()
-    train_dataset = TextDataset(model.tokenizer(train_text, return_tensors='pt'))
-    test_dataset = TextDataset(model.tokenizer(test_text, return_tensors='pt'))
-    train_dataloader = DataLoader(train_dataset, batch_size=params.lm_batch_size,
-                                  shuffle=True, drop_last=True, collate_fn=collate_fn)
-    test_dataloader = DataLoader(test_dataset, batch_size=params.lm_batch_size,
-                                 shuffle=False, drop_last=False, collate_fn=collate_fn)
+    train_text = open(args.corpus_path + '-train', 'r').read().lower()
+    test_text = open(args.corpus_path + '-test', 'r').read().lower()
+    train_dataset = FocusTextDataset(model.tokenizer(train_text, return_tensors='pt'), model.tokenizer)
+    test_dataset = FocusTextDataset(model.tokenizer(test_text, return_tensors='pt'), model.tokenizer)
 
     optimizer = AdamW(model.model.parameters(), lr=5e-5)
 
-    for epoch in range(100):
-        train_losses, test_losses = [], []
+    for epoch in range(10):
+        train_dataloader = DataLoader(train_dataset, batch_size=params.lm_batch_size,
+                                      shuffle=True, drop_last=True, collate_fn=collate_fn)
+        test_dataloader = DataLoader(test_dataset, batch_size=params.lm_batch_size,
+                                     shuffle=False, drop_last=False, collate_fn=collate_fn)
 
-        print('Train')
-        for batch in tqdm(train_dataloader):
-            optimizer.zero_grad()
-            loss = model.train_forward({key: batch[key].to(device) for key in batch}).loss
-            train_losses.append(loss.item())
-            loss.backward()
-            optimizer.step()
+        train_len = len(train_dataloader)
+        test_len = len(test_dataloader)
+        train_iter_num = params.iter_num
+        test_iter_num = (train_iter_num * test_len) // train_len
 
-            if len(train_losses) == 1000:
-                print(np.mean(train_losses))
-                train_losses = []
+        train_dataloader = iter(train_dataloader)
+        test_dataloader = iter(test_dataloader)
 
-        print(np.mean(train_losses))
+        for i in range(train_len // train_iter_num):
+            train_losses, test_losses = [], []
+            train_accuracy, test_accuracy = [], []
 
-        print('Test')
-        for batch in tqdm(test_dataloader):
-            with torch.no_grad():
-                loss = model.train_forward({key: batch[key].to(device) for key in batch}).loss
-                test_losses.append(loss.item())
+            for _ in tqdm(range(train_iter_num)):
+                batch = next(train_dataloader)
+                optimizer.zero_grad()
+                predictions = model.train_forward({key: batch[key].to(device) for key in batch})
+                loss = predictions.loss
+                train_losses.append(loss.item())
+                accuracy = accuracy_metric(torch.argmax(predictions.logits, -1).detach().cpu(), batch['input_ids'])
+                train_accuracy.append(accuracy)
 
-            if len(test_losses) == 1000:
-                print(np.mean(test_losses))
-                test_losses = []
+                loss.backward()
+                optimizer.step()
 
-        print(np.mean(test_losses))
-        model.model.save_pretrained(args.output_model)
+            for _ in tqdm(range(test_iter_num)):
+                batch = next(test_dataloader)
+                with torch.no_grad():
+                    predictions = model.train_forward({key: batch[key].to(device) for key in batch})
+                    loss = predictions.loss
+                    test_losses.append(loss.item())
+                    accuracy = accuracy_metric(torch.argmax(predictions.logits, -1).detach().cpu(), batch['input_ids'])
+                    test_accuracy.append(accuracy)
+
+            print(i, 'Train', np.mean(train_losses), np.mean(train_accuracy), 'Test', np.mean(test_losses),
+                  np.mean(test_accuracy))
+
+            if i % 10 == 0:
+                output_path = os.path.join(args.output_model, str(i))
+                os.mkdir(output_path)
+
+            model.model.save_pretrained(output_path)
+            model.tokenizer.save_pretrained(output_path)
 
 
 if __name__ == "__main__":

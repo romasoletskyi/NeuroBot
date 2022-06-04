@@ -81,7 +81,7 @@ class TimeNet(nn.Module):
         return embedding.float()
 
 
-class CasualModel:
+class CausalModel:
     def __init__(self, model, tokenizer):
         self.model = model
         self.tokenizer = tokenizer
@@ -98,10 +98,16 @@ class CasualModel:
         return self.model(**tokens, labels=tokens['input_ids'])
 
 
-class BertModel(CasualModel):
+class BertModel(CausalModel):
     def __init__(self):
-        CasualModel.__init__(self, AutoModelForCausalLM.from_pretrained('cointegrated/rubert-tiny2', is_decoder=True),
+        CausalModel.__init__(self, AutoModelForCausalLM.from_pretrained('cointegrated/rubert-tiny2', is_decoder=True),
                              AutoTokenizer.from_pretrained('cointegrated/rubert-tiny2'))
+
+
+class GPTModel(CausalModel):
+    def __init__(self):
+        CausalModel.__init__(self, AutoModelForCausalLM.from_pretrained('sberbank-ai/rugpt3small_based_on_gpt2'),
+                             AutoTokenizer.from_pretrained('sberbank-ai/rugpt3small_based_on_gpt2'))
 
 
 class Model:

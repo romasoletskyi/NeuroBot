@@ -8,7 +8,8 @@ message_time_norm = 240
 time_net_batch_size = 64
 
 chunk_size = 128
-lm_batch_size = 64
+lm_batch_size = 16
+iter_num = 1000
 
 dataset_path = 'data/telegram-full.csv'
 names_path = 'data/telegram-full.json'
