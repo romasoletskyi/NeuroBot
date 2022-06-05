@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from typing import Union, Tuple, List
 
 import params
@@ -95,7 +95,7 @@ class CausalModel:
         self.model.resize_token_embeddings(len(self.tokenizer))
 
     def train_forward(self, tokens):
-        return self.model(**tokens, labels=tokens['input_ids'])
+        return self.model(**tokens)
 
 
 class BertModel(CausalModel):
@@ -105,9 +105,20 @@ class BertModel(CausalModel):
 
 
 class GPTModel(CausalModel):
-    def __init__(self):
-        CausalModel.__init__(self, AutoModelForCausalLM.from_pretrained('sberbank-ai/rugpt3small_based_on_gpt2'),
-                             AutoTokenizer.from_pretrained('sberbank-ai/rugpt3small_based_on_gpt2'))
+    def __init__(self, train_mode=True):
+        if train_mode:
+            config = AutoConfig.from_pretrained('sberbank-ai/rugpt3small_based_on_gpt2')
+            config.attn_pdrop = params.train_dropout
+            config.resid_pdrop = params.train_dropout
+            config.summary_first_dropout = params.train_dropout
+
+            model = AutoModelForCausalLM.from_pretrained('sberbank-ai/rugpt3small_based_on_gpt2', config=config)
+            tokenizer = AutoTokenizer.from_pretrained('sberbank-ai/rugpt3small_based_on_gpt2')
+        else:
+            model = AutoModelForCausalLM.from_pretrained(params.model_path)
+            tokenizer = AutoTokenizer.from_pretrained(params.model_path)
+
+        CausalModel.__init__(self, model, tokenizer)
 
 
 class Model:

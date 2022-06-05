@@ -26,7 +26,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 from tqdm import tqdm
-from typing import Dict
+from transformers import get_linear_schedule_with_warmup
 
 import params
 from model.model import GPTModel
@@ -54,7 +54,7 @@ class FocusTextDataset(Dataset):
         token_bound = min(new_tokens)
         focus_token = tokenizer.vocab[params.focus_sender.lower()]
 
-        start_index = torch.arange(self.tokens['input_ids'].shape[1] - params.chunk_size + 1)
+        start_index = torch.arange(self.tokens['input_ids'].shape[1] - params.chunk_size)
         inner_index = torch.arange(params.chunk_size)
 
         batches: torch.Tensor = self.tokens['input_ids'].squeeze(0)[start_index[:, None] + inner_index[None, :]]
@@ -63,14 +63,18 @@ class FocusTextDataset(Dataset):
 
         is_focus = (batches[:, -1] == focus_token) + (
                     batches[torch.arange(batches.shape[0]), where_last_sender] == focus_token)
-        return is_focus
+        indices = torch.arange(len(is_focus))
+
+        return indices[is_focus]
 
     def __len__(self):
         return len(self.indices)
 
     def __getitem__(self, idx):
         focus_idx = self.indices[idx]
-        return {key: self.tokens[key][:, focus_idx: focus_idx + params.chunk_size] for key in self.tokens}
+        item = {key: self.tokens[key][:, focus_idx: focus_idx + params.chunk_size] for key in self.tokens}
+        item['labels'] = item['input_ids']
+        return item
 
 
 def collate_fn(examples):
@@ -88,7 +92,6 @@ def main():
     args = parser.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    output_path = args.output_model
     model = GPTModel()
     model.model.to(device)
 
@@ -97,9 +100,12 @@ def main():
     train_dataset = FocusTextDataset(model.tokenizer(train_text, return_tensors='pt'), model.tokenizer)
     test_dataset = FocusTextDataset(model.tokenizer(test_text, return_tensors='pt'), model.tokenizer)
 
+    epoch_number = 1
     optimizer = AdamW(model.model.parameters(), lr=5e-5)
+    scheduler = get_linear_schedule_with_warmup(optimizer, 1500,
+                                                (len(train_dataset) * epoch_number) // params.lm_batch_size)
 
-    for epoch in range(10):
+    for epoch in range(epoch_number):
         train_dataloader = DataLoader(train_dataset, batch_size=params.lm_batch_size,
                                       shuffle=True, drop_last=True, collate_fn=collate_fn)
         test_dataloader = DataLoader(test_dataset, batch_size=params.lm_batch_size,
@@ -113,37 +119,42 @@ def main():
         train_dataloader = iter(train_dataloader)
         test_dataloader = iter(test_dataloader)
 
+        output_path = os.path.join(args.output_model, str(epoch))
+        if not os.path.isdir(output_path):
+            os.mkdir(output_path)
+
         for i in range(train_len // train_iter_num):
             train_losses, test_losses = [], []
             train_accuracy, test_accuracy = [], []
 
+            model.model.train()
             for _ in tqdm(range(train_iter_num)):
                 batch = next(train_dataloader)
                 optimizer.zero_grad()
                 predictions = model.train_forward({key: batch[key].to(device) for key in batch})
                 loss = predictions.loss
                 train_losses.append(loss.item())
-                accuracy = accuracy_metric(torch.argmax(predictions.logits, -1).detach().cpu(), batch['input_ids'])
+                accuracy = accuracy_metric(torch.argmax(predictions.logits[..., :-1, :], -1).detach().cpu(),
+                                           batch['labels'][..., 1:])
                 train_accuracy.append(accuracy)
 
                 loss.backward()
                 optimizer.step()
+                scheduler.step()
 
+            model.model.eval()
             for _ in tqdm(range(test_iter_num)):
                 batch = next(test_dataloader)
                 with torch.no_grad():
                     predictions = model.train_forward({key: batch[key].to(device) for key in batch})
                     loss = predictions.loss
                     test_losses.append(loss.item())
-                    accuracy = accuracy_metric(torch.argmax(predictions.logits, -1).detach().cpu(), batch['input_ids'])
+                    accuracy = accuracy_metric(torch.argmax(predictions.logits[..., :-1, :], -1).detach().cpu(),
+                                               batch['labels'][..., 1:])
                     test_accuracy.append(accuracy)
 
             print(i, 'Train', np.mean(train_losses), np.mean(train_accuracy), 'Test', np.mean(test_losses),
                   np.mean(test_accuracy))
-
-            if i % 10 == 0:
-                output_path = os.path.join(args.output_model, str(i))
-                os.mkdir(output_path)
 
             model.model.save_pretrained(output_path)
             model.tokenizer.save_pretrained(output_path)
