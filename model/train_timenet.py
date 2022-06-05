@@ -2,8 +2,7 @@ import argparse
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn.functional as F
-from typing import Sequence, Tuple
+from typing import Sequence
 from tqdm import tqdm
 
 import params
@@ -37,17 +36,18 @@ def collate_fn(batch):
 
 
 def calculate_loss(pred: torch.Tensor, history_batch: Sequence[Sequence[Message]],
-                   message_batch: Sequence[Message]) -> Tuple[torch.Tensor, torch.Tensor]:
+                   message_batch: Sequence[Message]) -> torch.Tensor:
+    epsilon = 1e-6
     prob_pred, time_pred = pred[:, 0], pred[:, 1]
 
     is_focus_sender = torch.tensor(np.array([message.sender == params.focus_sender for message in message_batch]))
-    prob_loss = F.binary_cross_entropy(prob_pred, is_focus_sender.float())
-
     time_deltas = [message.time - history[-1].time for history, message in zip(history_batch, message_batch)]
     time_deltas = torch.tensor(np.array([t.total_seconds() / params.message_time_norm for t in time_deltas]))
-    time_loss = -torch.mean(torch.log(time_pred) - time_pred * time_deltas)
 
-    return prob_loss, time_loss
+    log_likelihood = is_focus_sender * (torch.log(prob_pred + epsilon) + torch.log(
+        time_pred) - time_deltas * time_pred) + ~is_focus_sender * torch.log(1 - prob_pred + epsilon)
+
+    return -torch.mean(log_likelihood)
 
 
 def main():
@@ -75,35 +75,32 @@ def main():
     optimizer = torch.optim.Adam(model.parameters())
 
     for epochs in range(10):
-        prob_losses, time_losses = [], []
+        losses = []
 
+        model.train()
         for history_batch, message_batch in tqdm(train_dataloader):
             optimizer.zero_grad()
 
             pred = model(history_batch)
-            prob_loss, time_loss = calculate_loss(pred, history_batch, message_batch)
-            loss = prob_loss + time_loss
-            prob_losses.append(prob_loss.item())
-            time_losses.append(time_loss.item())
+            loss = calculate_loss(pred, history_batch, message_batch)
+            losses.append(loss.item())
 
             loss.backward()
             optimizer.step()
 
-        avg_train_prob_loss = np.mean(prob_losses)
-        avg_train_time_loss = np.mean(time_losses)
-        prob_losses, time_losses = [], []
+        avg_train_loss = np.mean(losses)
+        losses = []
 
+        model.eval()
         for history_batch, message_batch in tqdm(test_dataloader):
             with torch.no_grad():
                 pred = model(history_batch)
-                prob_loss, time_loss = calculate_loss(pred, history_batch, message_batch)
-                prob_losses.append(prob_loss.item())
-                time_losses.append(time_loss.item())
+                loss = calculate_loss(pred, history_batch, message_batch)
+                losses.append(loss.item())
 
-        avg_test_prob_loss = np.mean(prob_losses)
-        avg_test_time_loss = np.mean(time_losses)
-        print('Train loss:', 'prob', avg_train_prob_loss, 'time', avg_train_time_loss,
-              'Test loss:', 'prob', avg_test_prob_loss, 'time', avg_test_time_loss)
+        avg_test_loss = np.mean(losses)
+        print('Train loss:', avg_train_loss,
+              'Test loss:', avg_test_loss)
 
         torch.save(model.state_dict(), args.model_path)
 

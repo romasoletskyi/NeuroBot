@@ -1,5 +1,6 @@
 import json
 import numpy as np
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -32,10 +33,13 @@ class TimeNet(nn.Module):
 
         self.encoder = nn.Sequential(
             nn.Linear(14 * params.time_buffer_limit, 64),
+            nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.Linear(64, 64),
+            nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.Linear(64, 64),
+            nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.Linear(64, 2)
         )
@@ -122,11 +126,63 @@ class GPTModel(CausalModel):
 
 
 class Model:
-    def __init__(self):
+    def __init__(self, user_id):
         self.buffer = deque(maxlen=params.message_buffer_limit)
 
+        self.time_model = TimeNet()
+        self.time_model.load_state_dict(torch.load(params.time_model_path))
+        self.time_model.eval()
+
+        self.text_model = GPTModel(train_mode=False)
+        self.text_model.model.eval()
+
+        self.user_id = user_id
+        self.sleep = False
+        self.sender_dict = json.load(open(params.senders_path, 'r'))
+
+        new_tokens = json.load(open(params.names_path, 'r'))
+        new_tokens = [self.text_model.tokenizer.vocab[token.lower()] for token in new_tokens]
+        self.token_bound = min(new_tokens)
+        self.focus_token = self.text_model.tokenizer.vocab[params.focus_sender.lower()]
+
     def generate(self, max_len=params.message_max_len) -> Union[None, Tuple[float, str]]:
-        pass
+        if self.sleep:
+            return None
+
+        prob, rate = self.time_model([list(self.buffer)[-params.time_buffer_limit:]])[0]
+        if np.random.random() > prob.item():
+            return None
+        wait_time = time.time() + params.message_time_norm * np.random.exponential(1 / rate.item())
+
+        previous_text = ' '.join(
+            [message.sender + ' ' + message.text for message in self.buffer] + [params.focus_sender]).lower()
+        input_ids = self.text_model.tokenizer(previous_text, return_tensors='pt')['input_ids'][:, -params.chunk_size:]
+
+        output = self.text_model.model.generate(
+            input_ids,
+            do_sample=True,
+            max_length=params.chunk_size + max_len,
+            top_k=50,
+            top_p=0.95,
+            pad_token_id=self.text_model.tokenizer.eos_token_id
+        )[0, params.chunk_size:]
+
+        end = (output >= self.token_bound) & (output != self.focus_token)
+        output = output[:torch.argmax(end.long())]
+        reply = self.text_model.tokenizer.decode(output, skip_special_tokens=True)
+
+        return wait_time, reply
 
     def update_buffer(self, message):
-        self.buffer.append(message)
+        sender = message.sender.first_name
+        if message.sender.last_name:
+            sender += ' ' + message.sender.last_name
+        text = message.text
+
+        if message.from_id.user_id == self.user_id and text == params.stop_word:
+            self.sleep = True
+        elif message.from_id.user_id == self.user_id and text == params.restart_word:
+            self.sleep = False
+
+        self.buffer.append(Message(self.sender_dict[sender] if sender in self.sender_dict else sender,
+                                   message.date, text))
